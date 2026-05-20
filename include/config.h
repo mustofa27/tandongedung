@@ -42,7 +42,7 @@
 #define TG_POLL_INTERVAL 10000
 
 /* ================= TELEGRAM ================= */
-#define BOT_TOKEN      "8142814376:AAHl_cedDkoJJ5hDsx8cYkN6y-GpVsp3k1A"
+#define BOT_TOKEN      ""
 #define SUP_ADM_COUNT  2
 
 /* ================= FEATURE FLAGS ================= */
