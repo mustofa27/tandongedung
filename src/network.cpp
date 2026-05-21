@@ -6,27 +6,59 @@
 #include <time.h>
 
 void connectWiFi() {
-  if (WiFi.status() == WL_CONNECTED) return;
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(300);
-    Serial.print(".");
+  static unsigned long lastAttempt = 0;
+  const unsigned long RETRY_INTERVAL = 5000; // Retry every 5 seconds
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("[WIFI] Connected successfully.");
+    return; // Already connected
   }
-  Serial.println("\n[WIFI] Connected");
+
+  unsigned long now = millis();
+  if (now - lastAttempt >= RETRY_INTERVAL) {
+    Serial.println("[WIFI] Attempting to connect...");
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    lastAttempt = now;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("[WIFI] Connected successfully.");
+  } else {
+    Serial.println("[WIFI] Connection failed. Retrying...");
+  }
 }
 
 void reconnectMQTT() {
-  if (!ENABLE_MQTT)      return;
-  if (client.connected()) return;
-  while (!client.connected()) {
-    Serial.print("[MQTT] Connecting...");
-    if (client.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASSWORD)) {
-      Serial.println("[MQTT] Connected");
-    } else {
-      Serial.print("FAIL | state=");
-      Serial.println(client.state());
-      delay(2000);
-    }
+  if (!ENABLE_MQTT)                   return;
+  if (WiFi.status() != WL_CONNECTED)  return;  // WiFi must be up first
+
+  static bool          wasConnected = false;
+  static unsigned long lastAttempt  = 0;
+  const  unsigned long COOLDOWN_MS  = 5000;
+
+  bool nowConnected = client.connected();
+
+  // Detect a dropped connection and log it once
+  if (wasConnected && !nowConnected) {
+    Serial.println("[MQTT] Connection lost");
+    wasConnected = false;
+  }
+
+  if (nowConnected) {
+    wasConnected = true;
+    return;
+  }
+
+  // Throttle reconnect attempts
+  if (millis() - lastAttempt < COOLDOWN_MS) return;
+  lastAttempt = millis();
+
+  Serial.print("[MQTT] Connecting...");
+  if (client.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASSWORD)) {
+    Serial.println(" Connected");
+    wasConnected = true;
+  } else {
+    Serial.printf(" FAIL | state=%d\n", client.state());
   }
 }
 
@@ -84,13 +116,13 @@ void updateConfigFromServer() {
 }
 
 void publishMQTT() {
-  if (!ENABLE_MQTT)        return;
   if (!sensorOnline)       return;
-  if (!client.connected()) return;
-
   waterLevel_m = waterLevel_mm / 1000.0f;
   if (abs(waterLevel_m - lastWaterLevel_m) < CHANGE_THRESH) return;
-
+  if(!client.connected()) {
+    reconnectMQTT();
+    if (client.connected()) client.loop();
+  }
   char payload[16];
   snprintf(payload, sizeof(payload), "%.2f", waterLevel_m);
   bool ok = client.publish(MQTT_TOPIC, payload, false);

@@ -51,11 +51,6 @@ void setup() {
 void loop() {
   connectWiFi();
 
-  if (ENABLE_MQTT) {
-    reconnectMQTT();
-    client.loop();
-  }
-
   if (ENABLE_SENSOR_SIM) {
     simulateWaterSensor();
     updatePumpLogic();
@@ -75,7 +70,9 @@ void loop() {
   handleSerialWaterLevel();
 
   if (millis() - mqttTimer >= MQTT_INTERVAL) {
-    if (ENABLE_MQTT) publishMQTT();
+    if (ENABLE_MQTT) {
+      publishMQTT();
+    }
     mqttTimer = millis();
   }
 

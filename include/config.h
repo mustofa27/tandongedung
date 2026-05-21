@@ -12,12 +12,12 @@
 #define MQTT_PORT      8883
 #define MQTT_USER      "poltera_water"
 #define MQTT_PASSWORD  "P0lterajaya@2026"
-#define MQTT_CLIENT_ID "bengkel_tenaga-8f14"
-#define MQTT_TOPIC     "poltera_water/bengkel_tenaga-8f14/water_level"
+#define MQTT_CLIENT_ID "gedung_a-8f14"
+#define MQTT_TOPIC     "poltera_water/gedung_a-8f14/water_level"
 
 /* ================= HTTP CONFIG ================= */
 #define CONFIG_URL \
-  "https://watermonitoring.poltera.ac.id/api/tandons/bengkel_tenaga-8f14"
+  "https://watermonitoring.poltera.ac.id/api/tandons/gedung_a-8f14"
 
 /* ================= PINS ================= */
 #define SENSOR_RX_PIN 16
@@ -30,7 +30,7 @@
 #define RELAY_OFF LOW
 
 /* ================= TANDON ================= */
-#define CHANGE_THRESH     0.005f   // 5 mm change threshold
+#define CHANGE_THRESH     0.01f   // 10 mm change threshold
 #define BLIND_DISTANCE_MM 300.0f   // 30 cm sensor blind zone
 
 /* ================= TIMING (ms) ================= */
