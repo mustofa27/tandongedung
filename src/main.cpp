@@ -55,6 +55,7 @@ void loop() {
     simulateWaterSensor();
     updatePumpLogic();
   } else if (ENABLE_SENSOR_UART) {
+    Serial.println("[SENSOR] Reading water level...");
     if (readWaterSensor(30)) updatePumpLogic();
   }
 
@@ -71,6 +72,7 @@ void loop() {
 
   if (millis() - mqttTimer >= MQTT_INTERVAL) {
     if (ENABLE_MQTT) {
+
       publishMQTT();
     }
     mqttTimer = millis();

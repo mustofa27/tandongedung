@@ -25,9 +25,9 @@ static void removeOutliersUsingClustering(uint16_t* readings, uint8_t count, uin
   uint16_t mad = (count % 2 == 0)
     ? (deviations[count / 2 - 1] + deviations[count / 2]) / 2
     : deviations[count / 2];
-  if (mad < 5) mad = 5;
+  if (mad < 3) mad = 3;
 
-  uint16_t threshold   = mad * 2.5;
+  uint16_t threshold   = mad;
   uint32_t sumSquares  = 0;
   uint8_t  clusterCount = 0;
   for (uint8_t i = 0; i < count; i++) {
@@ -142,8 +142,12 @@ bool readWaterSensor(uint8_t sampleCount) {
 
   for (uint8_t i = 0; i < sampleCount; i++) {
     uint16_t dist;
-    if (readSingleSensorValue(dist)) readings[validReadings++] = dist;
-    else i--;
+    if (readSingleSensorValue(dist)) {
+      readings[validReadings++] = dist;
+      Serial.printf("[SENSOR] Sample %d: %d mm\n", i + 1, dist);
+    } else {
+      i--;
+    }
     if (i < sampleCount - 1) delay(50);
   }
 
@@ -199,6 +203,7 @@ bool readWaterSensor(uint8_t sampleCount) {
       Serial.println("[SENSOR] Reading rejected → hold-last-valid");
       return true;
     }
+    Serial.printf("Distance reading %d mm out of range → \n", distance_mm);
     Serial.println("[SENSOR] Reading rejected, no last-valid → skip");
     return false;
   }
