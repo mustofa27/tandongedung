@@ -1,7 +1,8 @@
 #pragma once
 
 void connectWiFi();
+void waitForWiFi(unsigned long timeoutMs);
 void reconnectMQTT();
 void initNTP();
-void updateConfigFromServer();
+bool updateConfigFromServer();  // true when config loaded
 void publishMQTT();

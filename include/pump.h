@@ -1,3 +1,3 @@
 #pragma once
 
-void updatePumpLogic();
+void updatePumpLogic(bool immediate = false);

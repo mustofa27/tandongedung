@@ -2,9 +2,8 @@
 
 #include <Arduino.h>
 
-bool readSingleSensorValue(uint16_t& dist_mm);
-bool readWaterSensor(uint8_t sampleCount = 10);
+bool readWaterSensor();  // non-blocking; true when a new level was computed
 void resetSensorUART();
-void simulateWaterSensor();
+bool simulateWaterSensor();
 void handleSerialWaterLevel();
 bool isTankFullByBlind();

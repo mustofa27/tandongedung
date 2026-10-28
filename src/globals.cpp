@@ -1,7 +1,8 @@
 #include "globals.h"
 
-WiFiClientSecure     secured_client;
-PubSubClient         client(secured_client);
+WiFiClientSecure     secured_client;  // HTTPS config + Telegram
+WiFiClientSecure     mqtt_secure_client;  // MQTT only: sharing a socket corrupts the MQTT stream
+PubSubClient         client(mqtt_secure_client);
 UniversalTelegramBot bot(BOT_TOKEN, secured_client);
 
 HardwareSerial sensorSerial(1);

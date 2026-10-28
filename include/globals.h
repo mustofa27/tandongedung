@@ -8,6 +8,7 @@
 
 /* ---- Network objects ---- */
 extern WiFiClientSecure     secured_client;
+extern WiFiClientSecure     mqtt_secure_client;
 extern PubSubClient         client;
 extern UniversalTelegramBot bot;
 

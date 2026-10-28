@@ -1,236 +1,221 @@
 #include "sensor.h"
 #include "globals.h"
 #include "pump.h"
-#include <math.h>
+#include "device_config.h"
 
-/* ===== Internal clustering helpers (file-private) ===== */
+/* ===== Internal state (file-private) ===== */
+
+// Samples collected during the current update window
+static uint16_t      samples[SENSOR_MAX_SAMPLES];
+static uint8_t       sampleCount    = 0;
+static uint16_t      framesReceived = 0;  // valid frames this window, incl. range-rejected
+static unsigned long windowStart    = 0;
+
+// 1D Kalman filter on distance (mm)
+static bool    kfInit    = false;
+static float   kfX       = 0.0f;  // estimate
+static float   kfP       = 0.0f;  // estimate variance
+static uint8_t kfRejects = 0;     // consecutive gated measurements
+static float   noiseVar  = 0.0f;  // running variance of accepted innovations (mm^2)
+
+/* ===== Internal helpers ===== */
 
 static int compareUint16(const void* a, const void* b) {
-  return (*(uint16_t*)a - *(uint16_t*)b);
+  return (int)*(uint16_t*)a - (int)*(uint16_t*)b;
 }
 
-static void removeOutliersUsingClustering(uint16_t* readings, uint8_t count, uint16_t& result) {
-  if (count == 0) return;
-  qsort(readings, count, sizeof(uint16_t), compareUint16);
-
-  uint16_t median = (count % 2 == 0)
-    ? (readings[count / 2 - 1] + readings[count / 2]) / 2
-    : readings[count / 2];
-
-  uint16_t deviations[30];
-  for (uint8_t i = 0; i < count; i++)
-    deviations[i] = (readings[i] > median) ? (readings[i] - median) : (median - readings[i]);
-
-  qsort(deviations, count, sizeof(uint16_t), compareUint16);
-  uint16_t mad = (count % 2 == 0)
-    ? (deviations[count / 2 - 1] + deviations[count / 2]) / 2
-    : deviations[count / 2];
-  if (mad < 5) mad = 5;
-
-  uint16_t threshold   = mad * 2.5;
-  uint32_t sumSquares  = 0;
-  uint8_t  clusterCount = 0;
-  for (uint8_t i = 0; i < count; i++) {
-    uint16_t dev = (readings[i] > median) ? (readings[i] - median) : (median - readings[i]);
-    if (dev <= threshold) {
-      uint32_t v = readings[i];
-      sumSquares += v * v;
-      clusterCount++;
-    }
-  }
-  result = (clusterCount > 0)
-    ? (uint16_t)sqrtf((float)sumSquares / clusterCount)
-    : median;
+static uint16_t medianOf(uint16_t* v, uint8_t n) {
+  qsort(v, n, sizeof(uint16_t), compareUint16);
+  return (n % 2 == 0) ? (v[n / 2 - 1] + v[n / 2]) / 2 : v[n / 2];
 }
 
-static void removeOutliersUsing3Means(uint16_t* readings, uint8_t count, uint16_t& result) {
-  if (count < 3) {
-    uint32_t sum = 0;
-    for (uint8_t i = 0; i < count; i++) sum += readings[i];
-    result = sum / count;
-    return;
-  }
-  qsort(readings, count, sizeof(uint16_t), compareUint16);
+// MAD-gated mean: drop samples further than MAD_GATE robust sigmas from the
+// median, average the rest. Expects v sorted (medianOf sorts it).
+static float madMean(const uint16_t* v, uint8_t n, uint16_t median, uint8_t& kept) {
+  uint16_t dev[SENSOR_MAX_SAMPLES];
+  for (uint8_t i = 0; i < n; i++)
+    dev[i] = (v[i] > median) ? (v[i] - median) : (median - v[i]);
+  float sigma = max(medianOf(dev, n) * 1.4826f, MAD_MIN_SIGMA_MM);
+  float limit = MAD_GATE * sigma;
 
-  // Fall back to MAD clustering if the data spread is too narrow for 3 clusters
-  if ((readings[count - 1] - readings[0]) < 20) {
-    removeOutliersUsingClustering(readings, count, result);
-    return;
+  uint32_t sum = 0;
+  kept = 0;
+  for (uint8_t i = 0; i < n; i++) {
+    float d = (float)v[i] - median;
+    if (fabsf(d) <= limit) { sum += v[i]; kept++; }
   }
-
-  // Initialise 3 centroids at the 1/6, 3/6, 5/6 quantiles
-  uint16_t c1 = readings[count / 6];
-  uint16_t c2 = readings[count / 2];
-  uint16_t c3 = readings[(5 * count) / 6];
-
-  for (uint8_t iter = 0; iter < 5; iter++) {
-    uint32_t sum1 = 0, sum2 = 0, sum3 = 0;
-    uint8_t  cnt1 = 0, cnt2 = 0, cnt3 = 0;
-    for (uint8_t i = 0; i < count; i++) {
-      uint16_t d1 = (readings[i] > c1) ? (readings[i] - c1) : (c1 - readings[i]);
-      uint16_t d2 = (readings[i] > c2) ? (readings[i] - c2) : (c2 - readings[i]);
-      uint16_t d3 = (readings[i] > c3) ? (readings[i] - c3) : (c3 - readings[i]);
-      if      (d1 <= d2 && d1 <= d3) { sum1 += readings[i]; cnt1++; }
-      else if (d2 <= d1 && d2 <= d3) { sum2 += readings[i]; cnt2++; }
-      else                           { sum3 += readings[i]; cnt3++; }
-    }
-    if (cnt1 > 0) c1 = sum1 / cnt1;
-    if (cnt2 > 0) c2 = sum2 / cnt2;
-    if (cnt3 > 0) c3 = sum3 / cnt3;
-  }
-
-  // Pick the largest cluster and return its RMS
-  uint32_t sq1 = 0, sq2 = 0, sq3 = 0;
-  uint8_t  cnt1 = 0, cnt2 = 0, cnt3 = 0;
-  for (uint8_t i = 0; i < count; i++) {
-    uint16_t d1 = (readings[i] > c1) ? (readings[i] - c1) : (c1 - readings[i]);
-    uint16_t d2 = (readings[i] > c2) ? (readings[i] - c2) : (c2 - readings[i]);
-    uint16_t d3 = (readings[i] > c3) ? (readings[i] - c3) : (c3 - readings[i]);
-    uint32_t v  = readings[i];
-    if      (d1 <= d2 && d1 <= d3) { sq1 += v * v; cnt1++; }
-    else if (d2 <= d1 && d2 <= d3) { sq2 += v * v; cnt2++; }
-    else                           { sq3 += v * v; cnt3++; }
-  }
-  if      (cnt1 >= cnt2 && cnt1 >= cnt3 && cnt1 > 0) result = (uint16_t)sqrtf((float)sq1 / cnt1);
-  else if (cnt2 >= cnt1 && cnt2 >= cnt3 && cnt2 > 0) result = (uint16_t)sqrtf((float)sq2 / cnt2);
-  else if (cnt3 > 0)                                 result = (uint16_t)sqrtf((float)sq3 / cnt3);
-  else                                               result = readings[count / 2];
+  return kept > 0 ? (float)sum / kept : median;
 }
 
-/* ===== Public functions ===== */
+// Default FF-protocol frame (ff_uart_auto): [0xFF, H, L, SUM].
+// Non-blocking: only reads when a full frame is buffered.
+static bool readFrame(uint16_t& dist_mm) {
+  while (sensorSerial.available() >= 4) {
+    if (sensorSerial.peek() != 0xFF) { sensorSerial.read(); continue; }  // resync to header
 
-bool readSingleSensorValue(uint16_t& dist_mm) {
-  static uint8_t buffer[4];
-  static uint8_t index = 0;
-  unsigned long  startWait = millis();
+    uint8_t recv_buf[4] = { 0 };
+    sensorSerial.readBytes(recv_buf, 4);
+    uint8_t sum = recv_buf[0] + recv_buf[1] + recv_buf[2];
+    if (sum != recv_buf[3]) continue;
 
-  while (millis() - startWait < 500) {
-    while (sensorSerial.available()) {
-      uint8_t b = sensorSerial.read();
-      if (index == 0 && b != 0xFF) continue;
-      buffer[index++] = b;
-
-      if (index == 4) {
-        index = 0;
-        uint8_t checksum = buffer[0] + buffer[1] + buffer[2];
-        if (checksum != buffer[3]) return false;
-
-        uint16_t raw = (buffer[1] << 8) | buffer[2];
-        if (raw == 0xFFFF) return false;  // blind zone / no echo
-        if (raw == 0x0000) return false;  // invalid
-        if (raw < 280 || raw > 7500) return false;  // out of A01NYUB spec
-
-        dist_mm = raw;
-        return true;
-      }
-    }
-    delay(10);
+    dist_mm = recv_buf[1] << 8 | recv_buf[2];
+    return true;
   }
   return false;
 }
 
-bool readWaterSensor(uint8_t sampleCount) {
-  if (sampleCount < 1)  sampleCount = 1;
-  if (sampleCount > 30) sampleCount = 30;
-
-  // Hold-last-valid state (private to this function)
-  static float         lastValidWaterLevel_mm = -1.0f;
-  static unsigned long lastValidTime          = 0;
-
-  uint16_t readings[30];
-  uint8_t  validReadings = 0;
-
-  for (uint8_t i = 0; i < sampleCount; i++) {
-    uint16_t dist;
-    if (readSingleSensorValue(dist)) readings[validReadings++] = dist;
-    else i--;
-    if (i < sampleCount - 1) delay(50);
-  }
-
-  // All samples rejected — check if last valid reading suggests blind zone
-  if (validReadings == 0) {
-    if (lastValidTime > 0 &&
-        millis() - lastValidTime < 30000 &&
-        lastValidWaterLevel_mm >= (HEIGHT_TANK_MM - BLIND_DISTANCE_MM * 1.5f)) {
-      blindActive      = true;
-      waterLevel_mm    = HEIGHT_TANK_MM;
-      waterLevel_cm    = waterLevel_mm / 10.0f;
-      waterLevel_m     = waterLevel_mm / 1000.0f;
-      lastSensorMillis = millis();
-      sensorOnline     = true;
-      Serial.println("[SENSOR] All samples invalid → assume BLIND ZONE (tank full)");
-      return true;
-    }
-    return false;
-  }
-
-  // Select outlier removal based on sample count
-  if (validReadings < 3) {
-    uint32_t sum = 0;
-    for (uint8_t i = 0; i < validReadings; i++) sum += readings[i];
-    distance_mm = sum / validReadings;
-  } else if (validReadings >= 7) {
-    removeOutliersUsing3Means(readings, validReadings, distance_mm);
-  } else {
-    removeOutliersUsingClustering(readings, validReadings, distance_mm);
-  }
-
-  // Blind zone: sensor too close to water surface
-  if ((float)distance_mm < BLIND_DISTANCE_MM) {
-    blindActive      = true;
-    waterLevel_mm    = HEIGHT_TANK_MM;
-    waterLevel_cm    = waterLevel_mm / 10.0f;
-    waterLevel_m     = waterLevel_mm / 1000.0f;
-    lastSensorMillis = millis();
-    sensorOnline     = true;
+// Returns false if the measurement was rejected by the outlier gate
+static bool kalmanUpdate(float z) {
+  if (!kfInit) {
+    kfX = z; kfP = KF_R; kfRejects = 0; kfInit = true;
     return true;
   }
 
-  float calculated = HEIGHT_TANK_MM - (float)distance_mm;
+  kfP += KF_Q;  // predict: level may have drifted
+  float innov = z - kfX;
+  float S     = kfP + KF_R;
 
-  // Out-of-range: fall back to hold-last-valid
-  if (calculated < 0 || calculated > HEIGHT_TANK_MM * 1.05f) {
-    if (lastValidTime > 0 && millis() - lastValidTime < 10000) {
-      waterLevel_mm    = lastValidWaterLevel_mm;
-      waterLevel_cm    = waterLevel_mm / 10.0f;
-      waterLevel_m     = waterLevel_mm / 1000.0f;
+  if (innov * innov > KF_GATE_SIGMA * KF_GATE_SIGMA * S) {
+    if (++kfRejects < KF_MAX_REJECTS) return false;
+    // Persistent disagreement → real jump, re-initialise on it
+    kfX = z; kfP = KF_R; kfRejects = 0;
+    return true;
+  }
+
+  kfRejects = 0;
+  noiseVar  = (noiseVar == 0.0f) ? innov * innov : 0.95f * noiseVar + 0.05f * innov * innov;
+  float K = kfP / S;
+  kfX += K * innov;
+  kfP *= (1.0f - K);
+  return true;
+}
+
+static void setWaterLevel(float mm) {
+  waterLevel_mm = mm;
+  waterLevel_cm = mm / 10.0f;
+  waterLevel_m  = mm / 1000.0f;
+  if (!sensorOnline) Serial.println("[SENSOR ONLINE]");
+  sensorOnline = true;
+}
+
+/* ===== Public functions ===== */
+
+bool readWaterSensor() {
+  // Last filtered level, used to infer blind zone when every frame is rejected
+  static float         lastValidWaterLevel_mm = -1.0f;
+  static unsigned long lastValidTime          = 0;
+
+  // 1. Drain every buffered frame into the window
+  static uint16_t lastRejected   = 0;
+  static uint16_t rejectedFrames = 0;
+  uint16_t dist;
+  while (readFrame(dist)) {
+    framesReceived++;
+    if (dist == 0 || dist == 0xFFFF ||                          // invalid / no echo
+        dist > HEIGHT_TANK_MM + RANGE_MARGIN_MM) {              // beyond tank bottom
+      lastRejected = dist;
+      rejectedFrames++;
+      continue;
+    }
+    Serial.printf(" | sensor raw=%u mm |", dist);
+    if (sampleCount < SENSOR_MAX_SAMPLES) samples[sampleCount++] = dist;
+  }
+
+  // 2. Produce one level per update window
+  if (millis() - windowStart < SENSOR_UPDATE_INTERVAL) return false;
+  windowStart = millis();
+  uint8_t  n        = sampleCount;
+  uint16_t frames   = framesReceived;
+  uint16_t rejected = rejectedFrames;
+  sampleCount    = 0;
+  framesReceived = 0;
+  rejectedFrames = 0;
+
+  if (n < SENSOR_MIN_SAMPLES) {
+    // Slow sensor, nothing bad: keep the samples and finish the window next time
+    if (rejected == 0 && n > 0) {
+      sampleCount      = n;
       lastSensorMillis = millis();
-      sensorOnline     = true;
-      Serial.println("[SENSOR] Reading rejected → hold-last-valid");
+      return false;
+    }
+
+    // Every frame rejected right after a reading at the blind-zone edge → water
+    // rose into the blind zone (tank full)
+    if (n == 0 && rejected > 0 && lastValidTime > 0 &&
+        millis() - lastValidTime < 30000 &&
+        lastValidWaterLevel_mm >= HEIGHT_TANK_MM - (BLIND_DISTANCE_MM + 100.0f)) {
+      blindActive      = true;
+      kfInit           = false;
+      lastSensorMillis = millis();
+      setWaterLevel(HEIGHT_TANK_MM);
+      Serial.printf("[SENSOR] All %u frames invalid (last=%u) near blind edge → assume BLIND ZONE\n",
+                    rejected, lastRejected);
       return true;
     }
-    Serial.println("[SENSOR] Reading rejected, no last-valid → skip");
+
+    if (frames == 0 && n == 0)
+      Serial.printf("[SENSOR] No frames on RX%d (bytes waiting=%d) → check wiring/power\n",
+                    SENSOR_RX_PIN, sensorSerial.available());
+    else
+      Serial.printf("[SENSOR] %u frames, %u valid, %u rejected, last rejected=%u mm (accept 1-%.0f mm)\n",
+                    frames, n, rejected, lastRejected, HEIGHT_TANK_MM + RANGE_MARGIN_MM);
     return false;
   }
 
-  // Valid reading
+  lastSensorMillis = millis();  // sensor alive, even if the filter rejects this window
+  uint16_t median = medianOf(samples, n);
+
+  // 3. Blind zone on the raw median: tank-full must not wait for the filter
+  if (median < BLIND_DISTANCE_MM) {
+    blindActive = true;
+    distance_mm = median;
+    kfInit      = false;
+    setWaterLevel(HEIGHT_TANK_MM);
+    Serial.printf("[SENSOR] median=%u mm < %.0f mm → BLIND ZONE (object/water too close)\n",
+                  median, BLIND_DISTANCE_MM);
+    return true;
+  }
+
+  // 4. MAD-gated mean of the window, then Kalman filter with outlier gate
+  uint8_t kept;
+  float   mean = madMean(samples, n, median, kept);
+  if (!kalmanUpdate(mean)) {
+    Serial.printf("[SENSOR] mean=%.1f mm rejected (estimate %.1f mm)\n", mean, kfX);
+    return false;
+  }
+
+  distance_mm = (uint16_t)(kfX + 0.5f);
+  float level = constrain(HEIGHT_TANK_MM - kfX, 0.0f, HEIGHT_TANK_MM);
+  Serial.printf("[SENSOR] n=%u kept=%u median=%u mean=%.1f filtered=%.1f level=%.1f mm"
+                " | noise=%.1f mm (set CHANGE_THRESH >= %.0f mm)\n",
+                n, kept, median, mean, kfX, level, sqrtf(noiseVar), 4.0f * sqrtf(noiseVar));
+
   blindActive            = false;
-  waterLevel_mm          = calculated;
-  waterLevel_cm          = waterLevel_mm / 10.0f;
-  waterLevel_m           = waterLevel_mm / 1000.0f;
-  lastValidWaterLevel_mm = waterLevel_mm;
+  lastValidWaterLevel_mm = level;
   lastValidTime          = millis();
-  lastSensorMillis       = millis();
-  if (!sensorOnline) Serial.println("[SENSOR ONLINE]");
-  sensorOnline = true;
+  setWaterLevel(level);
   return true;
 }
 
 void resetSensorUART() {
-  Serial.println("[UART] Resetting sensor UART...");
+  Serial.println("[UART] Sensor timeout → offline, resetting UART...");
+  sensorOnline = false;
   sensorSerial.end();
   delay(200);
   sensorSerial.begin(9600, SERIAL_8N1, SENSOR_RX_PIN, SENSOR_TX_PIN);
-  sensorOnline = true;
+  sampleCount      = 0;
+  framesReceived   = 0;
+  kfInit           = false;
+  lastSensorMillis = millis();  // retry again after another SENSOR_TIMEOUT
 }
 
-void simulateWaterSensor() {
-  if (manualOverride) return;
+bool simulateWaterSensor() {
+  if (manualOverride) return false;
   static float          sim_mm  = 2000.0f;
   static bool           turun   = true;
   static unsigned long  lastSim = 0;
 
-  if (millis() - lastSim < 5000) return;
+  if (millis() - lastSim < 5000) return false;
   lastSim = millis();
 
   if (turun) { sim_mm -= 150.0f; if (sim_mm <= 0)             turun = false; }
@@ -244,24 +229,29 @@ void simulateWaterSensor() {
   blindActive      = (distance_mm <= BLIND_DISTANCE_MM);
   sensorOnline     = true;
   lastSensorMillis = millis();
+  return true;
 }
 
 void handleSerialWaterLevel() {
   if (!Serial.available()) return;
-  manualOverride = true;
   String input = Serial.readStringUntil('\n');
   input.trim();
+  if (input.length() == 0) return;
+  if (handleConfigCommand(input)) return;
+
   float val = input.toFloat();
   if (val <= 0 || val > HEIGHT_TANK_M) {
-    Serial.println("[CFG] Water level invalid!");
+    Serial.printf("[CFG] Water level invalid: \"%s\" (expect 0-%.2f m, or: info | portal | id | wifi | reset)\n",
+                  input.c_str(), HEIGHT_TANK_M);
     return;
   }
+  manualOverride = true;
   waterLevel_m  = val;
   waterLevel_cm = waterLevel_m * 100.0f;
   waterLevel_mm = waterLevel_m * 1000.0f;
   Serial.printf("[CFG] Water level updated: %.2f m | %.2f cm | %.0f mm\n",
                 waterLevel_m, waterLevel_cm, waterLevel_mm);
-  updatePumpLogic();
+  updatePumpLogic(true);
 }
 
 bool isTankFullByBlind() {

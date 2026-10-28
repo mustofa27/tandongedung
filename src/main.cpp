@@ -10,6 +10,10 @@
    [FIX-4] Handle all-samples-rejected case (blind zone total)
    [FIX-5] SENSOR_TIMEOUT raised to 15000 ms
    [FIX-6] Remove dead code before blind zone check
+   [CHG-7] Non-blocking sensor read, median + Kalman filter
+   [CHG-8] Relay = dry-run protection: cut on low water / sensor offline
+   [CHG-9] Non-blocking WiFi/MQTT reconnect, client.loop() every pass
+   [CHG-10] Setup portal + serial commands: WiFi & device id stored in NVS
 ====================================================== */
 #include <Arduino.h>
 #include <WiFi.h>
@@ -19,6 +23,9 @@
 #include "sensor.h"
 #include "pump.h"
 #include "telegram.h"
+#include "device_config.h"
+
+static bool configLoaded = false;
 
 void setup() {
   Serial.begin(115200);
@@ -29,13 +36,22 @@ void setup() {
   pinMode(LED_IND, OUTPUT);
   digitalWrite(RELAY_PIN, RELAY_OFF);
   digitalWrite(LED_IND, HIGH);
+  ResetPress press = checkResetButton();  // as early as possible after boot
 
   sensorSerial.begin(9600, SERIAL_8N1, SENSOR_RX_PIN, SENSOR_TX_PIN);
-  connectWiFi();
+  checkFirmwareUpdate();  // new upload → config cleared → portal below
+  loadDeviceConfig();
+  if (press == RESET_NONE && isProvisioned()) {
+    waitForWiFi(15000);
+  } else {
+    startConfigPortal();
+    connectWiFi();  // saved WiFi still connects in the background
+  }
   secured_client.setInsecure();
+  mqtt_secure_client.setInsecure();
   initNTP();
 
-  if (ENABLE_SERVER_CFG) updateConfigFromServer();
+  if (ENABLE_SERVER_CFG) configLoaded = updateConfigFromServer();
 
   if (ENABLE_MQTT) {
     client.setServer(MQTT_SERVER, MQTT_PORT);
@@ -49,27 +65,31 @@ void setup() {
 }
 
 void loop() {
+  handleConfigPortal();
   connectWiFi();
 
   if (ENABLE_MQTT) {
-    reconnectMQTT();
-    client.loop();
+    if (client.connected()) client.loop();
+    else                    reconnectMQTT();
   }
 
   if (ENABLE_SENSOR_SIM) {
-    simulateWaterSensor();
-    updatePumpLogic();
+    if (simulateWaterSensor()) updatePumpLogic();
   } else if (ENABLE_SENSOR_UART) {
-    if (readWaterSensor(30)) updatePumpLogic();
+    if (readWaterSensor()) updatePumpLogic();
   }
 
-  if (ENABLE_SERVER_CFG && millis() - configTimer >= CONFIG_INTERVAL) {
-    updateConfigFromServer();
+  // Retry every 30 s until the first config loads, then every CONFIG_INTERVAL
+  unsigned long cfgInterval = configLoaded ? CONFIG_INTERVAL : 30000;
+  if (ENABLE_SERVER_CFG && WiFi.status() == WL_CONNECTED &&
+      millis() - configTimer >= cfgInterval) {
+    if (updateConfigFromServer()) configLoaded = true;
     configTimer = millis();
   }
 
   if (ENABLE_SENSOR_UART && millis() - lastSensorMillis > SENSOR_TIMEOUT) {
     resetSensorUART();
+    updatePumpLogic();  // sensor offline → cut relay
   }
 
   handleSerialWaterLevel();
@@ -81,18 +101,18 @@ void loop() {
 
   static unsigned long lastBotPoll = 0;
   if (millis() - lastBotPoll > TG_POLL_INTERVAL) {
-    if (WiFi.status() == WL_CONNECTED)
+    if (strlen(BOT_TOKEN) > 0 && WiFi.status() == WL_CONNECTED)
       bot.getUpdates(bot.last_message_received + 1);
     lastBotPoll = millis();
   }
 
   if (millis() - hbTimer >= HB_INTERVAL) {
     Serial.printf(" | HEIGHT=%.2f m | [HB] %.2f mm | %.2f cm | %.2f m"
-                  " | dist=%u mm | Pump=%s%s%s\n",
+                  " | dist=%u mm | Relay=%s%s%s\n",
                   HEIGHT_TANK_M,
                   waterLevel_mm, waterLevel_cm, waterLevel_m,
                   distance_mm,
-                  pumpState    ? "ON"               : "OFF",
+                  pumpState    ? "ON"               : "CUT",
                   blindActive  ? " | BLIND"          : "",
                   !sensorOnline ? " | SENSOR OFFLINE" : "");
     hbTimer = millis();
@@ -101,10 +121,11 @@ void loop() {
 
 // ---- Everything below this line has been moved to separate files ----
 // network.cpp  → connectWiFi, reconnectMQTT, initNTP, updateConfigFromServer, publishMQTT
-// sensor.cpp   → readSingleSensorValue, readWaterSensor, resetSensorUART,
+// sensor.cpp   → readWaterSensor, resetSensorUART,
 //                simulateWaterSensor, handleSerialWaterLevel, isTankFullByBlind
 // pump.cpp     → updatePumpLogic
 // telegram.cpp → sendTelegram, sendTelegramSafe
+// device_config.cpp → device id + WiFi setup portal, serial config commands
 // globals.cpp  → all shared global variables
 // config.h     → all compile-time constants and feature flags
 
