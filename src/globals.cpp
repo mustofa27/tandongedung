@@ -19,6 +19,8 @@ float HEIGHT_TANK_M    = 1.02f;
 float HEIGHT_TANK_MM   = 1025.0f;
 float WARNING_LEVEL_MM = 0.0f;
 float EMPTY_LEVEL_MM   = 0.0f;
+float SENSOR_FULL_DIST_M  = 0.30f;  // fallback until the server config loads
+float SENSOR_FULL_DIST_MM = 300.0f;
 
 bool pumpState      = false;
 bool sensorOnline   = false;

@@ -40,7 +40,7 @@
 
 /* ================= TANDON ================= */
 #define CHANGE_THRESH     0.010f   // publish deadband (m); keep >= 4x logged noise or consumption over-counts
-#define BLIND_DISTANCE_MM 300.0f   // 30 cm sensor blind zone
+// Full-tank / blind-zone distance comes from the config API (SENSOR_FULL_DIST_MM)
 #define RANGE_MARGIN_MM   200.0f   // accept raw readings up to tank height + 20 cm
 
 /* ================= SENSOR FILTER ================= */

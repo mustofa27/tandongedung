@@ -29,6 +29,8 @@ extern float HEIGHT_TANK_M;
 extern float HEIGHT_TANK_MM;
 extern float WARNING_LEVEL_MM;
 extern float EMPTY_LEVEL_MM;
+extern float SENSOR_FULL_DIST_M;   // sensor → water surface when full (= blind zone)
+extern float SENSOR_FULL_DIST_MM;
 
 /* ---- State flags ---- */
 extern bool pumpState;

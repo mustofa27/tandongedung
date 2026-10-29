@@ -101,7 +101,9 @@ bool updateConfigFromServer() {
   float newHeight = doc["data"]["height_max"];
   float newWarn   = doc["data"]["height_warning"];
   float newEmpty  = doc["data"]["height_min"];
-  Serial.printf("[CONFIG] Parsed → %.3f | %.3f | %.3f\n", newHeight, newWarn, newEmpty);
+  float newFull   = doc["data"]["sensor_distance_full"] | 0.0f;
+  Serial.printf("[CONFIG] Parsed → %.3f | %.3f | %.3f | full dist %.3f\n",
+                newHeight, newWarn, newEmpty, newFull);
 
   if (newHeight <= 0) {
     Serial.println("[CONFIG] height_max INVALID");
@@ -116,8 +118,16 @@ bool updateConfigFromServer() {
   WARNING_LEVEL_MM = WARNING_LEVEL_M * 1000.0f;
   EMPTY_LEVEL_MM   = EMPTY_LEVEL_M   * 1000.0f;
 
+  // Missing or out of range → keep the previous value
+  if (newFull > 0 && newFull < newHeight) {
+    SENSOR_FULL_DIST_M  = newFull;
+    SENSOR_FULL_DIST_MM = SENSOR_FULL_DIST_M * 1000.0f;
+  } else {
+    Serial.printf("[CONFIG] sensor_distance_full INVALID, keeping %.3f m\n", SENSOR_FULL_DIST_M);
+  }
+
   Serial.println("=== CONFIG UPDATED ===");
-  Serial.printf("HEIGHT_TANK_M = %.3f\n", HEIGHT_TANK_M);
+  Serial.printf("HEIGHT_TANK_M = %.3f | SENSOR_FULL_DIST_M = %.3f\n", HEIGHT_TANK_M, SENSOR_FULL_DIST_M);
   http.end();
   return true;
 }

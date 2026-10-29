@@ -140,10 +140,11 @@ bool readWaterSensor() {
     }
 
     // Every frame rejected right after a reading at the blind-zone edge → water
-    // rose into the blind zone (tank full)
-    if (n == 0 && rejected > 0 && lastValidTime > 0 &&
-        millis() - lastValidTime < 30000 &&
-        lastValidWaterLevel_mm >= HEIGHT_TANK_MM - (BLIND_DISTANCE_MM + 100.0f)) {
+    // rose into the blind zone (tank full). Once in the blind zone, stay there
+    // until a valid reading returns, so a long-full tank doesn't go offline.
+    bool nearBlindEdge = lastValidTime > 0 && millis() - lastValidTime < 30000 &&
+                         lastValidWaterLevel_mm >= HEIGHT_TANK_MM - (SENSOR_FULL_DIST_MM + 100.0f);
+    if (n == 0 && rejected > 0 && (blindActive || nearBlindEdge)) {
       blindActive      = true;
       kfInit           = false;
       lastSensorMillis = millis();
@@ -166,13 +167,13 @@ bool readWaterSensor() {
   uint16_t median = medianOf(samples, n);
 
   // 3. Blind zone on the raw median: tank-full must not wait for the filter
-  if (median < BLIND_DISTANCE_MM) {
+  if (median < SENSOR_FULL_DIST_MM) {
     blindActive = true;
     distance_mm = median;
     kfInit      = false;
     setWaterLevel(HEIGHT_TANK_MM);
     Serial.printf("[SENSOR] median=%u mm < %.0f mm → BLIND ZONE (object/water too close)\n",
-                  median, BLIND_DISTANCE_MM);
+                  median, SENSOR_FULL_DIST_MM);
     return true;
   }
 
@@ -226,7 +227,7 @@ bool simulateWaterSensor() {
   waterLevel_cm    = sim_mm / 10.0f;
   waterLevel_m     = sim_mm / 1000.0f;
   distance_mm      = (uint16_t)(HEIGHT_TANK_MM - sim_mm);
-  blindActive      = (distance_mm <= BLIND_DISTANCE_MM);
+  blindActive      = (distance_mm <= SENSOR_FULL_DIST_MM);
   sensorOnline     = true;
   lastSensorMillis = millis();
   return true;
